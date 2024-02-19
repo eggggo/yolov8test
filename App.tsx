@@ -11,8 +11,9 @@ import {
   bundleResourceIO,
   cameraWithTensors,
 } from '@tensorflow/tfjs-react-native';
-import Svg, { Circle } from 'react-native-svg';
+import Svg, { Rect, Text as text } from 'react-native-svg';
 import { ExpoWebGLRenderingContext } from 'expo-gl';
+import labels from "./labels.json";
 
 // tslint:disable-next-line: variable-name
 const TensorCamera = cameraWithTensors(Camera);
@@ -42,6 +43,8 @@ const OUTPUT_TENSOR_WIDTH = 180;
 const OUTPUT_TENSOR_HEIGHT = OUTPUT_TENSOR_WIDTH / (IS_IOS ? 9 / 16 : 3 / 4);
 
 const numClass = 30;
+const MODEL_WIDTH = 800;
+const MODEL_HEIGHT = 800;
 
 // Whether to auto-render TensorCamera preview.
 const AUTO_RENDER = false;
@@ -53,7 +56,7 @@ export default function App() {
   const cameraRef = useRef(null);
   const [tfReady, setTfReady] = useState(false);
   const [model, setModel] = useState<tf.GraphModel>();
-  const [preds, setPreds] = useState<tf.NamedTensorMap>();
+  const [preds, setPreds] = useState<any[]>();
   const [fps, setFps] = useState(0);
   const [orientation, setOrientation] =
     useState<ScreenOrientation.Orientation>();
@@ -87,8 +90,8 @@ export default function App() {
       await tf.ready();
 
       //load custom tfjs model
-      const modelJson = require('./yolov8/model.json');
-      const modelWeights = [require('./yolov8/group1-shard1of11.bin'), require('./yolov8/group1-shard2of11.bin'), require('./yolov8/group1-shard3of11.bin'), require('./yolov8/group1-shard4of11.bin'), require('./yolov8/group1-shard5of11.bin'), require('./yolov8/group1-shard6of11.bin'), require('./yolov8/group1-shard7of11.bin'), require('./yolov8/group1-shard8of11.bin'), require('./yolov8/group1-shard9of11.bin'), require('./yolov8/group1-shard10of11.bin'), require('./yolov8/group1-shard11of11.bin')];
+      const modelJson = require('./aicookn/model.json');
+      const modelWeights = [require('./aicookn/group1-shard1of3.bin'), require('./aicookn/group1-shard2of3.bin'), require('./aicookn/group1-shard3of3.bin')];
 
       const model = await tf.loadGraphModel(bundleResourceIO(modelJson, modelWeights));
       setModel(model);
@@ -111,7 +114,6 @@ export default function App() {
   }, []);
 
   const preprocess = (source, modelWidth, modelHeight) => {
-    let xRatio, yRatio; // ratios for boxes
 
     const input = tf.tidy(() => {
       const img = source;
@@ -125,16 +127,13 @@ export default function App() {
         [0, 0],
       ]);
 
-      xRatio = maxSize / w; // update xRatio
-      yRatio = maxSize / h; // update yRatio
-
       return tf.image
         .resizeBilinear(imgPadded, [modelWidth, modelHeight]) // resize frame
         .div(255.0) // normalize
         .expandDims(0); // add batch
     });
 
-    return [input, xRatio, yRatio];
+    return input;
   };
 
   const handleCameraStream = async (
@@ -146,9 +145,8 @@ export default function App() {
       // Get the tensor and run pose detection.
       const imageTensor = images.next().value as tf.Tensor3D;
       tf.engine().startScope();
-      const [preprocImg, xRatio, yRatio] = preprocess(imageTensor, 800, 800);
+      const preprocImg = preprocess(imageTensor, MODEL_WIDTH, MODEL_HEIGHT);
       const startTs = Date.now();
-
       const res = model?.execute(preprocImg); // inference model
       const transRes = res?.transpose([0, 2, 1]); // transpose result [b, det, n] => [b, n, det]
       const boxes = tf.tidy(() => {
@@ -174,13 +172,12 @@ export default function App() {
         const rawScores = transRes.slice([0, 0, 4], [-1, -1, numClass]).squeeze(0); // #6 only squeeze axis 0 to handle only 1 class models
         return [rawScores.max(1), rawScores.argMax(1)];
       }); // get max scores and classes index
-
       const nms = await tf.image.nonMaxSuppressionAsync(boxes, scores, 500, 0.45, 0.2); // NMS to filter boxes
-
       const boxes_data = boxes.gather(nms, 0).dataSync(); // indexing boxes by nms index
       const scores_data = scores.gather(nms, 0).dataSync(); // indexing scores by nms index
       const classes_data = classes.gather(nms, 0).dataSync(); // indexing classes by nms index
 
+      setPreds([boxes_data, scores_data, classes_data]); // set predictions
       tf.dispose([res, transRes, boxes, scores, classes, nms]);
 
       tf.engine().endScope();
@@ -204,33 +201,43 @@ export default function App() {
 
   const renderPreds = () => {
     if (preds != null) {
-      // const keypoints = preds[0].keypoints
-      //   .filter((k) => (k.score ?? 0) > MIN_KEYPOINT_SCORE)
-      //   .map((k) => {
-      //     // Flip horizontally on android or when using back camera on iOS.
-      //     const flipX = IS_ANDROID || cameraType === CameraType.back;
-      //     const x = flipX ? getOutputTensorWidth() - k.x : k.x;
-      //     const y = k.y;
-      //     const cx =
-      //       (x / getOutputTensorWidth()) *
-      //       (isPortrait() ? CAM_PREVIEW_WIDTH : CAM_PREVIEW_HEIGHT);
-      //     const cy =
-      //       (y / getOutputTensorHeight()) *
-      //       (isPortrait() ? CAM_PREVIEW_HEIGHT : CAM_PREVIEW_WIDTH);
-      //     return (
-      //       <Circle
-      //         key={`skeletonkp_${k.name}`}
-      //         cx={cx}
-      //         cy={cy}
-      //         r='4'
-      //         strokeWidth='2'
-      //         fill='#00AA00'
-      //         stroke='white'
-      //       />
-      //     );
-      //   });
-
-      return <Svg style={styles.svg}>{ }</Svg>;
+      const [boxes, scores, classes, xRatio, yRatio] = preds;
+      var predRects = [];
+      for (let i = 0; i < scores.length; i++) {
+        const [y1, x2, y2, x1] = [
+          boxes[i * 4] / 800 * CAM_PREVIEW_HEIGHT,
+          CAM_PREVIEW_WIDTH - Math.min(boxes[i * 4 + 1], 450) / 450 * CAM_PREVIEW_WIDTH,
+          boxes[i * 4 + 2] / 800 * CAM_PREVIEW_HEIGHT,
+          CAM_PREVIEW_WIDTH - Math.min(boxes[i * 4 + 3], 450) / 450 * CAM_PREVIEW_WIDTH,
+        ];
+        const score = scores[i];
+        const label = labels[classes[i]];
+        const width = x2 - x1;
+        const height = y2 - y1;
+        //random color based on class
+        const color = `hsl(${(classes[i] * 12) % 360}, 100%, 50%)`;
+        const text = `${label} ${(score * 100).toFixed(2)}%`;
+        predRects.push(
+          <View key={`rect${i}-label`} style={{ position: 'absolute', top: y1, left: x1, width: width, height: height, borderColor: color, borderWidth: 2 }}>
+            <Text style={{ color: 'rgba(255, 255, 255, 1)', backgroundColor: color, fontSize: 12, lineHeight: 12, padding: 2 }}>{text}</Text>
+          </View>
+        );
+        predRects.push(
+          <Rect
+            key={`rect${i}`}
+            x={x1}
+            y={y1}
+            width={width}
+            height={height}
+            stroke={color}
+            strokeWidth='2'
+            fill='transparent'
+          />
+        );
+      }
+      return <Svg style={styles.svg}>
+        {predRects}
+      </Svg>;
     } else {
       return <View></View>;
     }
@@ -355,7 +362,7 @@ export default function App() {
           rotation={getTextureRotationAngleInDegrees()}
           onReady={handleCameraStream}
         />
-        { }
+        {renderPreds()}
         {renderFps()}
         {renderCameraTypeSwitcher()}
       </View>
